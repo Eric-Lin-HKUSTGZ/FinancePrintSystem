@@ -29,8 +29,8 @@ from pathlib import Path
 
 # 本地应用配置
 APP_HOST = "0.0.0.0"
-APP_PORT = 9998
-MAP_API_PORT = 15198
+APP_PORT = 8080
+MAP_API_PORT = 15202
 # Gradio后端调用自身API时使用的基础URL
 APP_INTERNAL_BASE_URL = f"http://127.0.0.1:{APP_PORT}"
 
@@ -41,8 +41,8 @@ MAP_API_BASE_URL = f"http://{MAP_API_HOST}:{MAP_API_PORT}"
 # 配置参数
 AUTH_USER = "brgpt"
 AUTH_PASS = "jiyMBV432-HAS98"
-BASE_URL = "https://pbms.hkust-gz.edu.cn"
-BASE_STATIC_DIR = Path("./test_file")
+BASE_URL = "https://pbmstest.hkust-gz.edu.cn"
+BASE_STATIC_DIR = Path("./test_file2")
 TEMP_DIR = tempfile.gettempdir()
 GUID_FILE_DIR = BASE_STATIC_DIR / "guid_files"
 SESSIONS_DIR = BASE_STATIC_DIR / "sessions"

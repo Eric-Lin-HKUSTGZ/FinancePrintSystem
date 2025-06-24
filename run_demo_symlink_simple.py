@@ -282,102 +282,82 @@ async def set_guid(request: GuidRequest):
         )
 
 async def process_files_async(guid: str):
-    # 获取或创建该guid的锁
-    if guid not in state_manager.guid_locks:
-        state_manager.guid_locks[guid] = asyncio.Lock()
-    async with state_manager.guid_locks[guid]:
-        # 检查是否已处理过且有文件，直接复用
-        with state_manager.state_lock:
-            guid_data = state_manager.guid_files.get(guid)
-            all_session_ids = state_manager.guid_sessions.get(guid, set())
-            brno = guid_data.get("brno", "") if guid_data else ""
-            files = guid_data["files"] if guid_data else []
-            should_distribute = guid_data and not guid_data["processing"] and files
+    print(f"[DEBUG] process_files_async started for guid={guid}")
+    downloaded_files = []
+    brno_number = ""
+    failed_files = []
 
-        if should_distribute:
-            print(f"[DEBUG] GUID {guid[:8]}... 已有缓存，分发到所有session")
-            if all_session_ids:
-                source_session_id = next(iter(all_session_ids))
-                await copy_files_to_sessions(files, all_session_ids, source_session_id)
-                # 更新所有session的files
-                state_manager.update_guid_data(guid, files, brno)
+    try:
+        print(f"[处理] 开始处理GUID {guid[:8]}... 的文件下载")
+        # 获取任一活跃会话作为下载的目标（文件会被复制到所有相关会话）
+        session_ids = state_manager.guid_sessions.get(guid, set())
+        if not session_ids:
+            print(f"[错误] GUID {guid[:8]}... 没有活跃会话")
             return
-        print(f"[DEBUG] process_files_async started for guid={guid}")
-        downloaded_files = []
-        brno_number = ""
-        failed_files = []
-
+        # 使用第一个会话进行文件下载
+        target_session_id = next(iter(session_ids))
+        user_session = state_manager.get_session(target_session_id)
+        if not user_session:
+            print(f"[错误] 找不到会话 {target_session_id[:8]}...")
+            return
+        # 处理GUID并下载文件
+        brno_number, brno_items, file_items = await asyncio.get_event_loop().run_in_executor(
+            thread_pool, process_guids, guid
+        )
+        # 并发下载文件
+        download_tasks = []
+        for file_type, g, _ in brno_items:
+            task = asyncio.create_task(download_file_async(file_type, g, user_session=user_session))
+            download_tasks.append(task)
+        for item in file_items:
+            file_type, g, name, attachtype = item
+            task = asyncio.create_task(download_file_async(file_type, g, name, attachtype, user_session=user_session))
+            download_tasks.append(task)
+        # 等待所有下载完成，加超时
         try:
-            print(f"[处理] 开始处理GUID {guid[:8]}... 的文件下载")
-            # 获取任一活跃会话作为下载的目标（文件会被复制到所有相关会话）
-            session_ids = state_manager.guid_sessions.get(guid, set())
-            if not session_ids:
-                print(f"[错误] GUID {guid[:8]}... 没有活跃会话")
-                return
-            # 使用第一个会话进行文件下载
-            target_session_id = next(iter(session_ids))
-            user_session = state_manager.get_session(target_session_id)
-            if not user_session:
-                print(f"[错误] 找不到会话 {target_session_id[:8]}...")
-                return
-            # 处理GUID并下载文件
-            brno_number, brno_items, file_items = await asyncio.get_event_loop().run_in_executor(
-                thread_pool, process_guids, guid
+            results = await asyncio.wait_for(
+                asyncio.gather(*download_tasks, return_exceptions=True),
+                timeout=120
             )
-            # 并发下载文件
-            download_tasks = []
-            for file_type, g, _ in brno_items:
-                task = asyncio.create_task(download_file_async(file_type, g, user_session=user_session))
-                download_tasks.append(task)
-            for item in file_items:
-                file_type, g, name, attachtype = item
-                task = asyncio.create_task(download_file_async(file_type, g, name, attachtype, user_session=user_session))
-                download_tasks.append(task)
-            # 等待所有下载完成，加超时
-            try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(*download_tasks, return_exceptions=True),
-                    timeout=120
-                )
-            except asyncio.TimeoutError:
-                print(f"[TIMEOUT] GUID {guid[:8]}... 文件下载超时")
-                results = []
-            for result in results:
-                if isinstance(result, Exception):
-                    print(f"[下载] GUID {guid[:8]}... 文件下载错误: {result}")
-                elif result:
-                    file_info, extracted_files = result
-                    if file_info:
-                        if os.path.exists(file_info["path"]):
-                            downloaded_files.append(file_info)
+        except asyncio.TimeoutError:
+            print(f"[TIMEOUT] GUID {guid[:8]}... 文件下载超时")
+            results = []
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"[下载] GUID {guid[:8]}... 文件下载错误: {result}")
+            elif result:
+                file_info, extracted_files = result
+                if file_info:
+                    if os.path.exists(file_info["path"]):
+                        downloaded_files.append(file_info)
+                    else:
+                        failed_files.append(file_info.get("filename", "unknown"))
+                    for ef in extracted_files:
+                        if os.path.exists(ef["path"]):
+                            downloaded_files.append(ef)
                         else:
-                            failed_files.append(file_info.get("filename", "unknown"))
-                        for ef in extracted_files:
-                            if os.path.exists(ef["path"]):
-                                downloaded_files.append(ef)
-                            else:
-                                failed_files.append(ef.get("filename", "unknown"))
-            all_session_ids = state_manager.guid_sessions.get(guid, set())
-            if len(all_session_ids) > 1:
-                await copy_files_to_sessions(downloaded_files, all_session_ids, target_session_id)
-            downloaded_files = deduplicate_files(downloaded_files)
+                            failed_files.append(ef.get("filename", "unknown"))
+        all_session_ids = state_manager.guid_sessions.get(guid, set())
+        if len(all_session_ids) > 1:
+            await copy_files_to_sessions(downloaded_files, all_session_ids, target_session_id)
+        downloaded_files = deduplicate_files(downloaded_files)
+        state_manager.update_guid_data(guid, downloaded_files, brno_number)
+        guid_data = state_manager.get_guid_data(guid=guid)
+        active_users = len(guid_data.get("users", set())) if guid_data else 0
+        print(f"[完成] GUID {guid[:8]}... 所有文件处理完成，共 {len(downloaded_files)} 个文件，{active_users} 个用户可用")
+        if failed_files:
+            print(f"[下载] GUID {guid[:8]}... 以下文件下载失败或丢失: {failed_files}")
+    except Exception as e:
+        print(f"[ERROR] process_files_async exception for guid={guid}: {e}")
+        import traceback; traceback.print_exc()
+    finally:
+        print(f"[DEBUG] process_files_async finally for guid={guid}, files={len(downloaded_files)}")
+        if downloaded_files:
             state_manager.update_guid_data(guid, downloaded_files, brno_number)
-            guid_data = state_manager.get_guid_data(guid=guid)
-            active_users = len(guid_data.get("users", set())) if guid_data else 0
-            print(f"[完成] GUID {guid[:8]}... 所有文件处理完成，共 {len(downloaded_files)} 个文件，{active_users} 个用户可用")
-            if failed_files:
-                print(f"[下载] GUID {guid[:8]}... 以下文件下载失败或丢失: {failed_files}")
-        except Exception as e:
-            print(f"[ERROR] process_files_async exception for guid={guid}: {e}")
-            import traceback; traceback.print_exc()
-        finally:
-            print(f"[DEBUG] process_files_async finally for guid={guid}, files={len(downloaded_files)}")
-            if downloaded_files:
-                state_manager.update_guid_data(guid, downloaded_files, brno_number)
-            else:
-                with state_manager.state_lock:
-                    if guid in state_manager.guid_files:
-                        state_manager.guid_files[guid]["processing"] = True
+        else:
+            with state_manager.state_lock:
+                if guid in state_manager.guid_files:
+                    state_manager.guid_files[guid]["processing"] = True
 
 async def download_file_async(file_type: str, guid: str, decoded_name: str = None, attachtype: str = None, user_session: UserSession = None) -> Tuple[Optional[Dict], List[Dict]]:
     """异步下载文件"""
@@ -503,19 +483,14 @@ def download_file(file_type: str, guid: str, decoded_name: str = None, attachtyp
     filename = filename.replace('/', '_').replace('\\', '_')
     real_file_path = os.path.join(guid_dir, filename)
 
-    # 如果已存在，直接返回
+    # 如果已存在，先删除，确保下载的是最新文件
     if os.path.exists(real_file_path):
-        main_file_info = {
-            "guid": guid,
-            "filename": filename,
-            "path": real_file_path,
-            "type": file_type
-        }
-        if attachtype:
-            main_file_info["attach_type"] = attachtype
-        return main_file_info, []
+        try:
+            os.remove(real_file_path)
+        except Exception as e:
+            print(f"[删除旧文件失败] {real_file_path}: {e}")
 
-    # 否则下载
+    # 下载并覆盖
     endpoint = "br/sysdownload" if file_type == "brno" else "file/download"
     url = f"{BASE_URL}/{endpoint}?g={guid}"
     auth = HTTPBasicAuth(AUTH_USER, AUTH_PASS)
@@ -546,7 +521,53 @@ def download_file(file_type: str, guid: str, decoded_name: str = None, attachtyp
         }
         if attachtype:
             main_file_info["attach_type"] = attachtype
-        return main_file_info, []
+
+        extracted_files = []
+        # 新增：自动解压 zip/rar 文件
+        if file_type == "file" and attachtype:
+            file_ext = os.path.splitext(real_file_path)[1].lower()
+            if file_ext in ['.zip', '.rar']:
+                extract_dir = os.path.join(guid_dir, attachtype)
+                os.makedirs(extract_dir, exist_ok=True)
+                try:
+                    if file_ext == '.zip':
+                        with zipfile.ZipFile(real_file_path, 'r') as zip_ref:
+                            zip_ref.extractall(extract_dir)
+                    elif file_ext == '.rar':
+                        with rarfile.RarFile(real_file_path, 'r') as rar_ref:
+                            rar_ref.extractall(extract_dir)
+                    for root, dirs, files in os.walk(extract_dir):
+                        for file in files:
+                            src_path = os.path.join(root, file)
+                            relative_path = os.path.relpath(src_path, extract_dir)
+                            if os.path.dirname(relative_path) != '.':
+                                dest_path = os.path.join(extract_dir, file)
+                                base, ext = os.path.splitext(file)
+                                counter = 1
+                                while os.path.exists(dest_path):
+                                    dest_path = os.path.join(extract_dir, f"{base}_{counter}{ext}")
+                                    counter += 1
+                                shutil.move(src_path, dest_path)
+                                src_path = dest_path
+                            final_name = os.path.basename(src_path)
+                            base, ext = os.path.splitext(final_name)
+                            counter = 1
+                            while os.path.exists(os.path.join(extract_dir, final_name)):
+                                final_name = f"{base}_{counter}{ext}"
+                                counter += 1
+                            final_path = os.path.join(extract_dir, final_name)
+                            if src_path != final_path:
+                                shutil.move(src_path, final_path)
+                            extracted_files.append({
+                                "guid": str(uuid.uuid4()),
+                                "filename": final_name,
+                                "path": final_path,
+                                "type": "file",
+                                "attach_type": attachtype
+                            })
+                except Exception as e:
+                    print(f"解压失败: {str(e)}")
+        return main_file_info, extracted_files
     except Exception as e:
         print(f"下载文件失败: {str(e)}")
         return None, []
@@ -651,6 +672,7 @@ def create_interface():
             2. 点击 **连接最新会话** 按钮以访问文件。
             3. 选择需要合并的文件类型，然后点击 **开始合并**。
             4. 点击生成的文档名称即可预览。
+            5. 若BR单内容更新，请关闭后重新打开。
             """)
 
         # 会话管理区域

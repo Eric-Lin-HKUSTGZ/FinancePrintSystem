@@ -12,5 +12,5 @@ test_concurrent.py
 test_isolation.py
 /test_file
 /test_file2
-.git
+debug_demo.py
 
