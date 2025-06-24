@@ -1,0 +1,16 @@
+/brno
+/file
+/static
+*.out
+run_bpms_guid_demo.py
+run_bpms_guid_demo2.py
+run_demo_final2.py
+run_demo_final3.py
+run_demo_final4.py
+run_demo_mp2.py
+test_concurrent.py
+test_isolation.py
+/test_file
+/test_file2
+.git
+
