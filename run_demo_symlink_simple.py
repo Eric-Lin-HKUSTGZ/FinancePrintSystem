@@ -26,6 +26,7 @@ import threading
 from datetime import datetime, timedelta
 import time
 from pathlib import Path
+import pikepdf
 
 # 本地应用配置
 APP_HOST = "0.0.0.0"
@@ -968,6 +969,18 @@ def create_interface():
                 if missing_files:
                     failed_files.extend(missing_files)
 
+                # 合并PDF - 使用pikepdf增强容错
+                def merge_pdfs_with_pikepdf(valid_files, output_path, failed_files):
+                    with pikepdf.Pdf.new() as merged_pdf:
+                        for file_path in valid_files:
+                            try:
+                                src = pikepdf.Pdf.open(file_path)
+                                merged_pdf.pages.extend(src.pages)
+                            except Exception as e:
+                                failed_files.append(os.path.basename(file_path))
+                                print(f"[pikepdf合并失败] {file_path}: {e}")
+                        merged_pdf.save(str(output_path))
+
                 merger = PdfMerger()
                 brno_number = user_session.brno
                 output_filename = f"{brno_number}.pdf" if brno_number else f"merged_{uuid.uuid4()}.pdf"
@@ -979,14 +992,7 @@ def create_interface():
                     output_filename = f"merged_{uuid.uuid4()}.pdf"
                     output_path = merge_dir / output_filename
                 
-                for file_path in valid_files:
-                    try:
-                        merger.append(file_path)
-                    except PdfReadError:
-                        failed_files.append(os.path.basename(file_path))
-                
-                merger.write(str(output_path))
-                merger.close()
+                merge_pdfs_with_pikepdf(valid_files, output_path, failed_files)
                 
                 relative_path = f"{session_id}/merged/{output_filename}"
                 preview_url = f"/sessions/{relative_path}"
