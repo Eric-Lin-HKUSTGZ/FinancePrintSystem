@@ -9,14 +9,14 @@ def test_guid_setting():
     # test_guid = "e5210ca905674ee793cd3c3d1dfad66e"  # 电商BR
     # test_guid = "ea4e689c5a524700b5621eeca6d029c0" # 无邀请函
     # test_guid = "2eed381054bc4fed8dc21d40cda47c52" # brno出错
-    # test_guid = "c592c289c162400aaeb68ccdd091d088" # 合并内容缺失
+    test_guid = "c592c289c162400aaeb68ccdd091d088" # 合并内容缺失
     # test_guid = "7294512a8c844074a1fe5acaef7c8919"  # 合并失败
     # test_guid = "6eb227bc252045c59499dce3b232e6c0"  # 测试用GUID
     # test_guid = "aba8175839fa408ebb2e11162da838c7"  # 下载异常
     # test_guid = "a4992db016174635922f8be64db385e3"
     # test_guid = "8de1cab34a094ac1b3604559288582fe"  # 压缩文件
     # test_guid = "f9f7578fdb6b4ef7b5d823dda1db06d5"
-    test_guid = "706b4cbdaaef4fbba04a26c506681b19"
+    # test_guid = "706b4cbdaaef4fbba04a26c506681b19"
     
     # 发送POST请求
     response = requests.post(

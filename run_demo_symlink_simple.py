@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 import time
 from pathlib import Path
 import pikepdf
+import fitz  # PyMuPDF
 
 # 本地应用配置
 APP_HOST = "0.0.0.0"
@@ -703,19 +704,25 @@ def create_interface():
             
             with gr.Column(elem_classes="selector-card"):
                 with gr.Row(elem_classes="selector-header"):
-                    gr.Markdown("### 发票文件", elem_classes="section-title")
-                    with gr.Row(elem_classes="btn-group"):
-                        invoice_select_all = gr.Button("全选", size="sm")
-                        invoice_clear_all = gr.Button("清空", size="sm")
-                invoice_selector = gr.CheckboxGroup(label="选择发票文件", elem_classes="checkbox-group")
-            
-            with gr.Column(elem_classes="selector-card"):
-                with gr.Row(elem_classes="selector-header"):
                     gr.Markdown("### 附件文件", elem_classes="section-title")
                     with gr.Row(elem_classes="btn-group"):
                         bill_select_all = gr.Button("全选", size="sm")
                         bill_clear_all = gr.Button("清空", size="sm")
                 bill_selector = gr.CheckboxGroup(label="选择附件文件", elem_classes="checkbox-group")
+
+            with gr.Column(elem_classes="selector-card"):
+                with gr.Row(elem_classes="selector-header"):
+                    gr.Markdown("### 发票文件", elem_classes="section-title")
+                    with gr.Row(elem_classes="btn-group"):
+                        invoice_select_all = gr.Button("全选", size="sm")
+                        invoice_clear_all = gr.Button("清空", size="sm")
+                invoice_selector = gr.CheckboxGroup(label="选择发票文件", elem_classes="checkbox-group")
+                # 新增：发票合并模式选择
+                invoice_merge_mode = gr.Radio(
+                    choices=[("1张/页", 1), ("2张/页", 2), ("4张/页", 4)],
+                    value=1,
+                    label="发票合并模式（每页几张）"
+                )
             
             with gr.Column(elem_classes="selector-card"):
                 with gr.Row(elem_classes="selector-header"):
@@ -905,7 +912,7 @@ def create_interface():
             """清除所有选择"""
             return gr.update(value=[]), gr.update(value=[]), gr.update(value=[]), gr.update(value=[])
 
-        async def merge_files_async(selected_guids: list, session_state, progress: gr.Progress = gr.Progress()):
+        async def merge_files_async(selected_guids: list, session_state, invoice_merge_mode, progress: gr.Progress = gr.Progress()):
             session_id = session_state.get('session_id')
             if not session_id:
                 return [
@@ -926,102 +933,155 @@ def create_interface():
                     gr.update(value="<div class='error'>❌ 请至少选择一个文件</div>", visible=True),
                 ]
             
-            try:
-                user_session.last_accessed = datetime.now()
-                files_to_merge = []
-                failed_files = []
-                files = user_session.get_files()
+            # try:
+            user_session.last_accessed = datetime.now()
+            files_to_merge = []
+            failed_files = []
+            files = user_session.get_files()
+            
+            # 使用 progress.tqdm 实时更新前端进度条
+            for guid in progress.tqdm(selected_guids, desc="文件处理中"):
+                file = next((f for f in files if f["guid"] == guid), None)
+                if not file:
+                    print(f"[合并] 用户会话 {session_id[:8]}..., 找不到文件GUID {guid}")
+                    continue
                 
-                # 使用 progress.tqdm 实时更新前端进度条
-                for guid in progress.tqdm(selected_guids, desc="文件处理中"):
-                    file = next((f for f in files if f["guid"] == guid), None)
-                    if not file:
-                        print(f"[合并] 用户会话 {session_id[:8]}..., 找不到文件GUID {guid}")
-                        continue
-                    
-                    try:
-                        # 逐个处理文件，以便更新进度
-                        converted_path = await process_file_for_merge(file, user_session)
-                        if converted_path:
-                            files_to_merge.append(converted_path)
-                        else:
-                            failed_files.append(file.get("filename", "未知文件"))
-                    except Exception as e:
-                        print(f"[合并] 会话 {session_id[:8]}... 处理文件 {file['filename']} 失败: {str(e)}")
-                        failed_files.append(file["filename"])
-
-                if not files_to_merge:
-                    return [
-                        gr.update(visible=False),
-                        gr.update(value="<div class='error'>❌ 所有选中的文件都处理失败，无法合并</div>", visible=True),
-                    ]
-                
-                progress(0.95, desc="正在合并PDF...")
-                
-                valid_files = []
-                missing_files = []
-                for file_path in files_to_merge:
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        valid_files.append(file_path)
+                try:
+                    # 逐个处理文件，以便更新进度
+                    converted_path = await process_file_for_merge(file, user_session)
+                    if converted_path:
+                        files_to_merge.append((file, converted_path))
                     else:
-                        missing_files.append(os.path.basename(file_path))
-                
-                if missing_files:
-                    failed_files.extend(missing_files)
+                        failed_files.append(file.get("filename", "未知文件"))
+                except Exception as e:
+                    print(f"[合并] 会话 {session_id[:8]}... 处理文件 {file['filename']} 失败: {str(e)}")
+                    failed_files.append(file["filename"])
 
-                # 合并PDF - 使用pikepdf增强容错
-                def merge_pdfs_with_pikepdf(valid_files, output_path, failed_files):
-                    with pikepdf.Pdf.new() as merged_pdf:
-                        for file_path in valid_files:
-                            try:
-                                src = pikepdf.Pdf.open(file_path)
-                                merged_pdf.pages.extend(src.pages)
-                            except Exception as e:
-                                failed_files.append(os.path.basename(file_path))
-                                print(f"[pikepdf合并失败] {file_path}: {e}")
-                        merged_pdf.save(str(output_path))
-
-                merger = PdfMerger()
-                brno_number = user_session.brno
-                output_filename = f"{brno_number}.pdf" if brno_number else f"merged_{uuid.uuid4()}.pdf"
-                merge_dir = user_session.get_merge_dir()
-                output_path = merge_dir / output_filename.replace("/", "_")
-                
-                valid_file_paths = set(os.path.abspath(f) for f in valid_files)
-                while os.path.abspath(str(output_path)) in valid_file_paths:
-                    output_filename = f"merged_{uuid.uuid4()}.pdf"
-                    output_path = merge_dir / output_filename
-                
-                merge_pdfs_with_pikepdf(valid_files, output_path, failed_files)
-                
-                relative_path = f"{session_id}/merged/{output_filename}"
-                preview_url = f"/sessions/{relative_path}"
-                html_content = f"""
-                    <div class="file-link">
-                        <a href="{preview_url}" target="_blank">
-                            📄 {output_filename}
-                        </a>
-                    </div>
-                """
-                
-                success_msg = f"<div class='success'>✅ 合并完成: {output_filename}</div>"
-                if failed_files:
-                    failed_list = "<br>".join(failed_files)
-                    success_msg += f"<div class='error'>❌ 以下文件处理或合并失败: <br>{failed_list}</div>"
-                
-                return [
-                    gr.update(value=html_content, visible=True),
-                    gr.update(value=success_msg, visible=True),
-                ]
-                
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                error_msg = f"<div class='error'>❌ 合并过程中发生意外错误: {str(e)}</div>"
+            if not files_to_merge:
                 return [
                     gr.update(visible=False),
-                    gr.update(value=error_msg, visible=True),
+                    gr.update(value="<div class='error'>❌ 所有选中的文件都处理失败，无法合并</div>", visible=True),
                 ]
+            
+            progress(0.95, desc="正在合并PDF...")
+            
+            valid_files = []
+            missing_files = []
+            for file, file_path in files_to_merge:
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    valid_files.append((file, file_path))
+                else:
+                    missing_files.append(os.path.basename(file_path))
+            
+            if missing_files:
+                failed_files.extend(missing_files)
+
+            brno_number = user_session.brno
+            output_filename = f"{brno_number}.pdf" if brno_number else f"merged_{uuid.uuid4()}.pdf"
+            merge_dir = user_session.get_merge_dir()
+            output_path = merge_dir / output_filename.replace("/", "_")
+            valid_file_paths = set(os.path.abspath(f[1]) for f in valid_files)
+            while os.path.abspath(str(output_path)) in valid_file_paths:
+                output_filename = f"merged_{uuid.uuid4()}.pdf"
+                output_path = merge_dir / output_filename
+
+            # --- 新增：发票N合1合并 ---
+            # 按类型分组
+            invoice_files = [f[1] for f in valid_files if f[0].get("attach_type") == "发票"]
+            other_files = [f[1] for f in valid_files if f[0].get("attach_type") != "发票"]
+            def merge_pdfs_with_pikepdf(valid_files, output_path, failed_files):
+                with pikepdf.Pdf.new() as merged_pdf:
+                    for file_path in valid_files:
+                        try:
+                            src = pikepdf.Pdf.open(file_path)
+                            merged_pdf.pages.extend(src.pages)
+                        except Exception as e:
+                            failed_files.append(os.path.basename(file_path))
+                            print(f"[pikepdf合并失败] {file_path}: {e}")
+                    merged_pdf.save(str(output_path))
+            def merge_pdfs_nup(pdf_paths, output_path, n_per_page=2):
+                a4_width, a4_height = fitz.paper_size("a4")
+                doc = fitz.open()
+                images = []
+                for pdf_path in pdf_paths:
+                    src = fitz.open(pdf_path)
+                    page = src[0]
+                    if n_per_page == 4:
+                        # 先转图片再旋转
+                        pix = page.get_pixmap(dpi=200)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        img = img.rotate(90, expand=True)  # PIL逆时针旋转90度
+                        # 转回pdf
+                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmpf:
+                            img.save(tmpf, format="PDF")
+                            tmp_pdf_path = tmpf.name
+                        img_pdf = fitz.open(tmp_pdf_path)
+                        images.append(img_pdf)
+                        os.remove(tmp_pdf_path)
+                    else:
+                        pix = page.get_pixmap(dpi=200)
+                        img_pdf = fitz.open()
+                        img_pdf.new_page(width=pix.width, height=pix.height)
+                        img_pdf[0].insert_image(fitz.Rect(0, 0, pix.width, pix.height), pixmap=pix)
+                        images.append(img_pdf)
+                    src.close()
+                for i in range(0, len(images), n_per_page):
+                    page = doc.new_page(width=a4_width, height=a4_height)
+                    if n_per_page == 2:
+                        w, h = a4_width, a4_height / 2
+                        positions = [(0, 0), (0, h)]
+                    else:
+                        w, h = a4_width / 2, a4_height / 2
+                        positions = [(0, 0), (w, 0), (0, h), (w, h)]
+                    for j, img_pdf in enumerate(images[i:i+n_per_page]):
+                        rect = fitz.Rect(*positions[j], positions[j][0]+w, positions[j][1]+h)
+                        page.show_pdf_page(rect, img_pdf, 0)
+                doc.save(str(output_path))
+            # --- 合并逻辑 ---
+            if invoice_files and int(invoice_merge_mode) in [2, 4]:
+                merge_pdfs_nup(invoice_files, output_path, n_per_page=int(invoice_merge_mode))
+                # 其他类型文件追加到后面
+                if other_files:
+                    # 先合成一个临时文件
+                    temp_path = str(output_path) + ".tmp.pdf"
+                    merge_pdfs_with_pikepdf(other_files, temp_path, failed_files)
+                    # 合并两个pdf
+                    with pikepdf.Pdf.open(str(output_path),allow_overwriting_input=True) as main_pdf, pikepdf.Pdf.open(temp_path,allow_overwriting_input=True) as other_pdf:
+                        main_pdf.pages.extend(other_pdf.pages)
+                        main_pdf.save(str(output_path))
+                    os.remove(temp_path)
+            else:
+                # 全部普通合并
+                merge_pdfs_with_pikepdf([f[1] for f in valid_files], output_path, failed_files)
+            # ---
+            relative_path = f"{session_id}/merged/{output_filename}"
+            preview_url = f"/sessions/{relative_path}"
+            html_content = f"""
+                <div class="file-link">
+                    <a href="{preview_url}" target="_blank">
+                        📄 {output_filename}
+                    </a>
+                </div>
+            """
+            
+            success_msg = f"<div class='success'>✅ 合并完成: {output_filename}</div>"
+            if failed_files:
+                failed_list = "<br>".join(failed_files)
+                success_msg += f"<div class='error'>❌ 以下文件处理或合并失败: <br>{failed_list}</div>"
+            
+            return [
+                gr.update(value=html_content, visible=True),
+                gr.update(value=success_msg, visible=True),
+            ]
+                
+            # except Exception as e:
+            #     import traceback
+            #     traceback.print_exc()
+            #     error_msg = f"<div class='error'>❌ 合并过程中发生意外错误: {str(e)}</div>"
+            #     return [
+            #         gr.update(visible=False),
+            #         gr.update(value=error_msg, visible=True),
+            #     ]
 
         async def process_file_for_merge(file: Dict, user_session) -> Optional[str]:
             """处理单个文件用于合并"""
@@ -1208,7 +1268,7 @@ def create_interface():
             outputs=[file_link, status_label]
         ).then(
             fn=merge_files_async,
-            inputs=[merge_order_state, session_state],
+            inputs=[merge_order_state, session_state, invoice_merge_mode],
             outputs=[file_link, status_label]
         ).then(
             fn=clear_all_selectors,
