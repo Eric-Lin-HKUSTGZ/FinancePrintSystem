@@ -48,8 +48,8 @@ def test_external_guid_endpoint():
     # 初始化参数
     # initial_guid = "d37f80dbc5594f1bb9150f80166d7e79"
     # initial_guid = "f9f7578fdb6b4ef7b5d823dda1db06d5"  # 替换为实际的初始GUID
-    initial_guid = "706b4cbdaaef4fbba04a26c506681b19"  # 测试用GUID
-    base_url = "https://pbms.hkust-gz.edu.cn"
+    initial_guid = "736cb0fc982b4b6a8ef2f1c825843cfc"  # 测试用GUID
+    base_url = "https://pbmstest.hkust-gz.edu.cn"
     auth = HTTPBasicAuth("brgpt", "jiyMBV432-HAS98")
     
     # 第一步：获取主GUID数据

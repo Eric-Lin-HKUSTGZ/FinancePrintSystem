@@ -31,19 +31,22 @@ import fitz  # PyMuPDF
 
 # 本地应用配置
 APP_HOST = "0.0.0.0"
-APP_PORT = 8080
-MAP_API_PORT = 15202
+# APP_PORT = 8080
+# MAP_API_PORT = 15202
+APP_PORT = 9999
+MAP_API_PORT = 15446  # 地图API端口
 # Gradio后端调用自身API时使用的基础URL
 APP_INTERNAL_BASE_URL = f"http://127.0.0.1:{APP_PORT}"
 
 # 外部服务配置
-MAP_API_HOST = "10.120.20.213"
+# MAP_API_HOST = "10.120.20.213"
+MAP_API_HOST = "10.120.20.176"
 MAP_API_BASE_URL = f"http://{MAP_API_HOST}:{MAP_API_PORT}"
 
 # 配置参数
 AUTH_USER = "brgpt"
 AUTH_PASS = "jiyMBV432-HAS98"
-BASE_URL = "https://pbmstest.hkust-gz.edu.cn"
+BASE_URL = "https://pbms.hkust-gz.edu.cn"
 BASE_STATIC_DIR = Path("./test_file2")
 TEMP_DIR = tempfile.gettempdir()
 GUID_FILE_DIR = BASE_STATIC_DIR / "guid_files"
@@ -945,7 +948,6 @@ def create_interface():
                 if not file:
                     print(f"[合并] 用户会话 {session_id[:8]}..., 找不到文件GUID {guid}")
                     continue
-                
                 try:
                     # 逐个处理文件，以便更新进度
                     converted_path = await process_file_for_merge(file, user_session)
@@ -957,6 +959,21 @@ def create_interface():
                     print(f"[合并] 会话 {session_id[:8]}... 处理文件 {file['filename']} 失败: {str(e)}")
                     failed_files.append(file["filename"])
 
+            # --- 强制排序：BR单、附件、境外票据、发票 ---
+            def file_type_key(item):
+                file, _ = item
+                if file["type"] == "brno":
+                    return (0, file["filename"])
+                elif file.get("attach_type") and "附件" in file.get("attach_type"):
+                    return (1, file["filename"])
+                elif file.get("attach_type") == "境外票据":
+                    return (2, file["filename"])
+                elif file.get("attach_type") == "发票":
+                    return (3, file["filename"])
+                else:
+                    return (4, file["filename"])
+            files_to_merge.sort(key=file_type_key)
+            print("files_to_merge:", files_to_merge)
             if not files_to_merge:
                 return [
                     gr.update(visible=False),
@@ -986,9 +1003,14 @@ def create_interface():
                 output_path = merge_dir / output_filename
 
             # --- 新增：发票N合1合并 ---
-            # 按类型分组
-            invoice_files = [f[1] for f in valid_files if f[0].get("attach_type") == "发票"]
-            other_files = [f[1] for f in valid_files if f[0].get("attach_type") != "发票"]
+            # 合并顺序：BR单、附件、境外票据、发票
+            brno_files = [f for f in valid_files if f[0]["type"] == "brno"]
+            bill_files = [f for f in valid_files if f[0].get("attach_type", "").find("附件") != -1]
+            overseas_files = [f for f in valid_files if f[0].get("attach_type") == "境外票据"]
+            invoice_files = [f for f in valid_files if f[0].get("attach_type") == "发票"]
+            # --- 新增：发票N合1合并 ---
+            invoice_paths = [f[1] for f in invoice_files]
+            other_paths = [f[1] for f in brno_files + bill_files + overseas_files]
             def merge_pdfs_with_pikepdf(valid_files, output_path, failed_files):
                 with pikepdf.Pdf.new() as merged_pdf:
                     for file_path in valid_files:
@@ -1038,21 +1060,24 @@ def create_interface():
                         page.show_pdf_page(rect, img_pdf, 0)
                 doc.save(str(output_path))
             # --- 合并逻辑 ---
-            if invoice_files and int(invoice_merge_mode) in [2, 4]:
-                merge_pdfs_nup(invoice_files, output_path, n_per_page=int(invoice_merge_mode))
-                # 其他类型文件追加到后面
-                if other_files:
-                    # 先合成一个临时文件
-                    temp_path = str(output_path) + ".tmp.pdf"
-                    merge_pdfs_with_pikepdf(other_files, temp_path, failed_files)
-                    # 合并两个pdf
-                    with pikepdf.Pdf.open(str(output_path),allow_overwriting_input=True) as main_pdf, pikepdf.Pdf.open(temp_path,allow_overwriting_input=True) as other_pdf:
-                        main_pdf.pages.extend(other_pdf.pages)
-                        main_pdf.save(str(output_path))
-                    os.remove(temp_path)
+            if invoice_paths and int(invoice_merge_mode) in [2, 4]:
+                # 1. 先合并BR单、附件、境外票据
+                pre_paths = [f[1] for f in files_to_merge if (f[0]["type"] == "brno" or (f[0].get("attach_type") and "附件" in f[0]["attach_type"]) or f[0].get("attach_type") == "境外票据")]
+                # 2. 生成发票N合1PDF到临时文件
+                invoice_temp_path = str(output_path) + ".invoice.pdf"
+                merge_pdfs_nup(invoice_paths, invoice_temp_path, n_per_page=int(invoice_merge_mode))
+                # 3. 合并顺序：BR单+附件+境外票据 -> 发票N合1
+                temp_path = str(output_path) + ".tmp.pdf"
+                merge_order = []
+                if pre_paths:
+                    merge_order.extend(pre_paths)
+                merge_order.append(invoice_temp_path)
+                merge_pdfs_with_pikepdf(merge_order, temp_path, failed_files)
+                os.rename(temp_path, str(output_path))
+                os.remove(invoice_temp_path)
             else:
                 # 全部普通合并
-                merge_pdfs_with_pikepdf([f[1] for f in valid_files], output_path, failed_files)
+                merge_pdfs_with_pikepdf([f[1] for f in files_to_merge], output_path, failed_files)
             # ---
             relative_path = f"{session_id}/merged/{output_filename}"
             preview_url = f"/sessions/{relative_path}"
@@ -1084,7 +1109,7 @@ def create_interface():
             #     ]
 
         async def process_file_for_merge(file: Dict, user_session) -> Optional[str]:
-            """处理单个文件用于合并"""
+            """处理单个文件用于合并，移除ofd转pdf"""
             user_session.last_accessed = datetime.now()
             file_path = file["path"]
             file_ext = os.path.splitext(file_path)[1].lower()
