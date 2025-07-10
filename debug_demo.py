@@ -31,23 +31,23 @@ import fitz  # PyMuPDF
 
 # 本地应用配置
 APP_HOST = "0.0.0.0"
-# APP_PORT = 8080
-# MAP_API_PORT = 15202
-APP_PORT = 9999
-MAP_API_PORT = 15446  # 地图API端口
+# APP_PORT = 9995
+# MAP_API_PORT = 20804
+APP_PORT = 9998
+MAP_API_PORT = 17764
 # Gradio后端调用自身API时使用的基础URL
 APP_INTERNAL_BASE_URL = f"http://127.0.0.1:{APP_PORT}"
 
 # 外部服务配置
-# MAP_API_HOST = "10.120.20.213"
-MAP_API_HOST = "10.120.20.176"
+MAP_API_HOST = "10.120.20.213"
+# MAP_API_HOST = "10.120.20.176"
 MAP_API_BASE_URL = f"http://{MAP_API_HOST}:{MAP_API_PORT}"
 
 # 配置参数
 AUTH_USER = "brgpt"
 AUTH_PASS = "jiyMBV432-HAS98"
 BASE_URL = "https://pbms.hkust-gz.edu.cn"
-BASE_STATIC_DIR = Path("./test_file2")
+BASE_STATIC_DIR = Path("./test_file")
 TEMP_DIR = tempfile.gettempdir()
 GUID_FILE_DIR = BASE_STATIC_DIR / "guid_files"
 SESSIONS_DIR = BASE_STATIC_DIR / "sessions"
@@ -657,6 +657,15 @@ def create_interface():
     .global-btn-row { display: flex; justify-content: center; gap: 16px; margin: 20px 0; }
     /* Increase font size for progress bar text */
     .progress-text { font-size: 1.1em !important; font-weight: bold !important; }
+    
+    /* 文件顺序管理样式 */
+    .order-section { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; background: #f8fafc; margin: 16px 0; }
+    .order-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .order-title { font-weight: 600; color: var(--primary); }
+    .order-controls { display: flex; gap: 8px; }
+    .file-order-display { background: white; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; min-height: 100px; }
+    .file-order-display h2 { margin: 0 0 12px 0 !important; font-size: 16px !important; color: var(--primary) !important; }
+    .file-order-display p { margin: 8px 0; line-height: 1.5; }
     """
 
     js_func = """
@@ -676,8 +685,9 @@ def create_interface():
             1. 等待系统通过API接收GUID并自动加载文件。
             2. 点击 **连接最新会话** 按钮以访问文件。
             3. 选择需要合并的文件类型，然后点击 **开始合并**。
-            4. 点击生成的文档名称即可预览。
-            5. 若BR单内容更新，请关闭后重新打开。
+            4. 在文件顺序管理区域可以拖拽调整文件合并顺序。
+            5. 点击生成的文档名称即可预览。
+            6. 若BR单内容更新，请关闭后重新打开。
             """)
 
         # 会话管理区域
@@ -735,6 +745,20 @@ def create_interface():
                         overseas_clear_all = gr.Button("清空", size="sm")
                 overseas_selector = gr.CheckboxGroup(label="选择境外票据文件", elem_classes="checkbox-group")
         
+        # 新增：文件顺序管理区域
+        with gr.Column(elem_classes="order-section"):
+            with gr.Row(elem_classes="order-header"):
+                gr.Markdown("### 📋 文件合并顺序管理", elem_classes="order-title")
+                with gr.Row(elem_classes="order-controls"):
+                    update_order_btn = gr.Button("🔄 更新顺序", variant="secondary", size="sm")
+                    clear_order_btn = gr.Button("🗑️ 清空顺序", variant="secondary", size="sm")
+            
+            # 使用Gradio原生组件替代HTML
+            file_order_display = gr.Markdown(
+                value="请先选择文件，然后点击\"更新顺序\"按钮",
+                elem_classes="file-order-display"
+            )
+        
         with gr.Row():
             merge_btn = gr.Button("✨ 开始合并", variant="primary", scale=0)
         
@@ -743,12 +767,13 @@ def create_interface():
             status_label = gr.HTML(visible=False)
 
         merge_order_state = gr.State([])
+        file_order_state = gr.State([])  # 新增：存储文件顺序状态
 
         def connect_latest_session():
             """连接最新的会话"""
             try:
                 import requests
-                response = requests.get(f"{MAP_API_BASE_URL}/api/latest_session")
+                response = requests.get(f"{APP_INTERNAL_BASE_URL}/api/latest_session")
                 if response.status_code == 200:
                     data = response.json()
                     session_id = data["session_id"]
@@ -821,7 +846,7 @@ def create_interface():
                     brno_files.append(f)
                 elif f.get("attach_type") == "发票":
                     invoice_files.append(f)
-                elif "附件" in f.get("attach_type", ""):
+                elif ("附件" in f.get("attach_type", "")) or ("合同" in f.get("attach_type", "")):
                     bill_files.append(f)
                 elif f.get("attach_type") == "境外票据":
                     overseas_files.append(f)
@@ -840,7 +865,8 @@ def create_interface():
             ]
 
         def update_merge_order(brno, invoice, bill, overseas, prev_order):
-            selected = brno + invoice + bill + overseas
+            # 按照业务要求的顺序：BR单、附件、境外票据、发票
+            selected = brno + bill + overseas + invoice
             new_order = [g for g in prev_order if g in selected]
             for g in selected:
                 if g not in new_order:
@@ -867,7 +893,7 @@ def create_interface():
 
                 if attach_type == "发票" and f.get("attach_type") == "发票":
                     valid_guids.append(f["guid"])
-                elif attach_type == "附件" and "附件" in f.get("attach_type", ""):
+                elif attach_type == "附件" and ("附件" in f.get("attach_type", "") or "合同" in f.get("attach_type", "")):
                     valid_guids.append(f["guid"])
                 elif attach_type == "境外票据" and f.get("attach_type") == "境外票据":
                     valid_guids.append(f["guid"])
@@ -887,9 +913,9 @@ def create_interface():
             files = user_session.get_files()
             allowed_extensions = {'.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg'}
             brno_guids = []
-            invoice_guids = []
             bill_guids = []
             overseas_guids = []
+            invoice_guids = []
 
             for f in files:
                 file_ext = os.path.splitext(f["filename"])[1].lower()
@@ -897,12 +923,12 @@ def create_interface():
                     continue
                 if f["type"] == "brno":
                     brno_guids.append(f["guid"])
-                elif f.get("attach_type") == "发票":
-                    invoice_guids.append(f["guid"])
-                elif "附件" in f.get("attach_type", ""):
+                elif ("附件" in f.get("attach_type", "")) or ("合同" in f.get("attach_type", "")):
                     bill_guids.append(f["guid"])
                 elif f.get("attach_type") == "境外票据":
                     overseas_guids.append(f["guid"])
+                elif f.get("attach_type") == "发票":
+                    invoice_guids.append(f["guid"])
 
             return [
                 gr.update(value=brno_guids),
@@ -915,28 +941,73 @@ def create_interface():
             """清除所有选择"""
             return gr.update(value=[]), gr.update(value=[]), gr.update(value=[]), gr.update(value=[])
 
-        async def merge_files_async(selected_guids: list, session_state, invoice_merge_mode, progress: gr.Progress = gr.Progress()):
+        def update_file_order(brno, invoice, bill, overseas, session_state):
+            """更新文件顺序列表"""
+            session_id = session_state.get('session_id')
+            if not session_id:
+                return gr.update(value="请先连接会话"), []
+            
+            user_session = state_manager.get_session(session_id)
+            if not user_session:
+                return gr.update(value="会话不存在"), []
+            
+            files = user_session.get_files()
+            # 按照业务要求的顺序：BR单、附件、境外票据、发票
+            selected_guids = brno + bill + overseas + invoice
+            
+            if not selected_guids:
+                return gr.update(value="请先选择文件"), []
+            
+            # 构建文件顺序列表
+            file_order_items = []
+            for i, guid in enumerate(selected_guids, 1):
+                file = next((f for f in files if f["guid"] == guid), None)
+                if file:
+                    file_type = "BRNO" if file["type"] == "brno" else file.get("attach_type", "文件")
+                    file_order_items.append({
+                        "guid": guid,
+                        "filename": file["filename"],
+                        "type": file_type,
+                        "order": i
+                    })
+            
+            # 生成Markdown格式的列表
+            markdown_content = "## 文件合并顺序\n\n"
+            for item in file_order_items:
+                markdown_content += f"**{item['order']}.** {item['filename']} ({item['type']})\n\n"
+            
+            return gr.update(value=markdown_content), file_order_items
+
+        def clear_file_order():
+            """清空文件顺序"""
+            return gr.update(value="文件顺序已清空"), []
+
+        def get_file_order_from_markdown(markdown_content):
+            """从Markdown内容中提取文件顺序"""
+            # 由于现在使用Markdown格式，我们直接使用selected_guids的顺序
+            # 这个函数现在主要用于兼容性，实际顺序由selected_guids决定
+            return []
+
+        # 在merge_files_async函数中，使用用户选择的顺序来合并文件
+        async def merge_files_async(selected_guids: list, session_state, invoice_merge_mode, file_order_markdown, progress: gr.Progress = gr.Progress()):
             session_id = session_state.get('session_id')
             if not session_id:
                 return [
                     gr.update(visible=False),
                     gr.update(value="<div class='error'>❌ 请先连接会话</div>", visible=True),
                 ]
-            
             user_session = state_manager.get_session(session_id)
             if not user_session:
                 return [
                     gr.update(visible=False),
                     gr.update(value="<div class='error'>❌ 会话不存在</div>", visible=True),
                 ]
-            
             if not selected_guids:
                 return [
                     gr.update(visible=False),
                     gr.update(value="<div class='error'>❌ 请至少选择一个文件</div>", visible=True),
                 ]
             
-            # try:
             user_session.last_accessed = datetime.now()
             files_to_merge = []
             failed_files = []
@@ -958,21 +1029,8 @@ def create_interface():
                 except Exception as e:
                     print(f"[合并] 会话 {session_id[:8]}... 处理文件 {file['filename']} 失败: {str(e)}")
                     failed_files.append(file["filename"])
-
-            # --- 强制排序：BR单、附件、境外票据、发票 ---
-            def file_type_key(item):
-                file, _ = item
-                if file["type"] == "brno":
-                    return (0, file["filename"])
-                elif file.get("attach_type") and "附件" in file.get("attach_type"):
-                    return (1, file["filename"])
-                elif file.get("attach_type") == "境外票据":
-                    return (2, file["filename"])
-                elif file.get("attach_type") == "发票":
-                    return (3, file["filename"])
-                else:
-                    return (4, file["filename"])
-            files_to_merge.sort(key=file_type_key)
+            
+            # 使用用户选择的顺序来合并文件
             print("files_to_merge:", files_to_merge)
             if not files_to_merge:
                 return [
@@ -980,8 +1038,10 @@ def create_interface():
                     gr.update(value="<div class='error'>❌ 所有选中的文件都处理失败，无法合并</div>", visible=True),
                 ]
             
-            progress(0.95, desc="正在合并PDF...")
+            # 直接使用selected_guids的顺序，这是用户选择的文件顺序
+            # 文件已经按照用户选择的顺序排列在files_to_merge中
             
+            progress(0.95, desc="正在合并PDF...")
             valid_files = []
             missing_files = []
             for file, file_path in files_to_merge:
@@ -989,10 +1049,9 @@ def create_interface():
                     valid_files.append((file, file_path))
                 else:
                     missing_files.append(os.path.basename(file_path))
-            
             if missing_files:
                 failed_files.extend(missing_files)
-
+            
             brno_number = user_session.brno
             output_filename = f"{brno_number}.pdf" if brno_number else f"merged_{uuid.uuid4()}.pdf"
             merge_dir = user_session.get_merge_dir()
@@ -1001,16 +1060,17 @@ def create_interface():
             while os.path.abspath(str(output_path)) in valid_file_paths:
                 output_filename = f"merged_{uuid.uuid4()}.pdf"
                 output_path = merge_dir / output_filename
-
-            # --- 新增：发票N合1合并 ---
-            # 合并顺序：BR单、附件、境外票据、发票
+            
+            # 合并顺序：根据用户选择的顺序
             brno_files = [f for f in valid_files if f[0]["type"] == "brno"]
             bill_files = [f for f in valid_files if f[0].get("attach_type", "").find("附件") != -1]
             overseas_files = [f for f in valid_files if f[0].get("attach_type") == "境外票据"]
             invoice_files = [f for f in valid_files if f[0].get("attach_type") == "发票"]
-            # --- 新增：发票N合1合并 ---
+            
+            # 合并逻辑
             invoice_paths = [f[1] for f in invoice_files]
             other_paths = [f[1] for f in brno_files + bill_files + overseas_files]
+            
             def merge_pdfs_with_pikepdf(valid_files, output_path, failed_files):
                 with pikepdf.Pdf.new() as merged_pdf:
                     for file_path in valid_files:
@@ -1021,6 +1081,7 @@ def create_interface():
                             failed_files.append(os.path.basename(file_path))
                             print(f"[pikepdf合并失败] {file_path}: {e}")
                     merged_pdf.save(str(output_path))
+            
             def merge_pdfs_nup(pdf_paths, output_path, n_per_page=2):
                 a4_width, a4_height = fitz.paper_size("a4")
                 doc = fitz.open()
@@ -1059,10 +1120,11 @@ def create_interface():
                         rect = fitz.Rect(*positions[j], positions[j][0]+w, positions[j][1]+h)
                         page.show_pdf_page(rect, img_pdf, 0)
                 doc.save(str(output_path))
-            # --- 合并逻辑 ---
+            
+            # 合并逻辑
             if invoice_paths and int(invoice_merge_mode) in [2, 4]:
                 # 1. 先合并BR单、附件、境外票据
-                pre_paths = [f[1] for f in files_to_merge if (f[0]["type"] == "brno" or (f[0].get("attach_type") and "附件" in f[0]["attach_type"]) or f[0].get("attach_type") == "境外票据")]
+                pre_paths = [f[1] for f in files_to_merge if (f[0]["type"] == "brno" or (f[0].get("attach_type") and "附件" in f[0].get("attach_type")) or f[0].get("attach_type") == "境外票据")]
                 # 2. 生成发票N合1PDF到临时文件
                 invoice_temp_path = str(output_path) + ".invoice.pdf"
                 merge_pdfs_nup(invoice_paths, invoice_temp_path, n_per_page=int(invoice_merge_mode))
@@ -1076,9 +1138,9 @@ def create_interface():
                 os.rename(temp_path, str(output_path))
                 os.remove(invoice_temp_path)
             else:
-                # 全部普通合并
+                # 全部普通合并 - 直接使用files_to_merge的顺序，已经按照业务要求排列
                 merge_pdfs_with_pikepdf([f[1] for f in files_to_merge], output_path, failed_files)
-            # ---
+            
             relative_path = f"{session_id}/merged/{output_filename}"
             preview_url = f"/sessions/{relative_path}"
             html_content = f"""
@@ -1088,12 +1150,10 @@ def create_interface():
                     </a>
                 </div>
             """
-            
             success_msg = f"<div class='success'>✅ 合并完成: {output_filename}</div>"
             if failed_files:
                 failed_list = "<br>".join(failed_files)
                 success_msg += f"<div class='error'>❌ 以下文件处理或合并失败: <br>{failed_list}</div>"
-            
             return [
                 gr.update(value=html_content, visible=True),
                 gr.update(value=success_msg, visible=True),
@@ -1141,21 +1201,97 @@ def create_interface():
                 if user_session:
                     user_session.last_accessed = datetime.now()
                 
-                # 更新会话信息
+                # 直接使用本地状态管理器检查会话状态
+                if user_session and not user_session.processing:
+                    file_results = load_initial_files(session_state)
+                    return file_results
+                else:
+                    # 会话正在处理中，返回处理状态
+                    return [
+                        gr.update(choices=[]),
+                        gr.update(choices=[]),
+                        gr.update(choices=[]),
+                        gr.update(choices=[]),
+                        gr.update(value="<div class='info'>⏳ 文件加载中...</div>", visible=True),
+                        session_state
+                    ]
+            else:
+                # 没有会话ID，尝试自动连接最新会话
                 try:
                     import requests
-                    response = requests.get(f"http://10.120.20.213:{MAP_API_PORT}/api/session/{session_id}")
+                    response = requests.get(f"{APP_INTERNAL_BASE_URL}/api/latest_session")
                     if response.status_code == 200:
+                        data = response.json()
+                        session_id = data["session_id"]
+                        session_state = session_state.copy()
+                        session_state['session_id'] = session_id
+                        
+                        print(f"[前端] 自动连接到会话: {session_id[:8]}...")
                         file_results = load_initial_files(session_state)
                         return file_results
-                    else:
-                        # 会话不存在，清除状态
-                        session_state = {}
-                        return load_initial_files(session_state)
-                except Exception:
-                    return load_initial_files(session_state)
-            else:
+                except Exception as e:
+                    print(f"[前端] 自动连接会话失败: {e}")
+                
                 return load_initial_files(session_state)
+
+        def refresh_interface_with_session_id(session_state):
+            """定时刷新界面数据，包括会话ID显示"""
+            print(f"[定时器] 开始刷新界面，当前session_state: {session_state}")
+            session_id = session_state.get('session_id')
+            if session_id:
+                print(f"[定时器] 当前会话ID: {session_id[:8]}...")
+                # 首先更新本地会话的访问时间
+                user_session = state_manager.get_session(session_id)
+                if user_session:
+                    user_session.last_accessed = datetime.now()
+                    print(f"[定时器] 会话处理状态: {user_session.processing}")
+                
+                # 直接使用本地状态管理器检查会话状态
+                if user_session and not user_session.processing:
+                    print(f"[定时器] 会话处理完成，加载文件...")
+                    file_results = load_initial_files(session_state)
+                    return [session_id] + file_results
+                else:
+                    # 会话正在处理中，返回处理状态
+                    print(f"[定时器] 会话正在处理中...")
+                    return [
+                        session_id,
+                        gr.update(choices=[]),
+                        gr.update(choices=[]),
+                        gr.update(choices=[]),
+                        gr.update(choices=[]),
+                        gr.update(value="<div class='info'>⏳ 文件加载中...</div>", visible=True),
+                        session_state
+                    ]
+            else:
+                print(f"[定时器] 没有会话ID，尝试自动连接...")
+                # 没有会话ID，尝试自动连接最新会话
+                try:
+                    import requests
+                    response = requests.get(f"{APP_INTERNAL_BASE_URL}/api/latest_session")
+                    if response.status_code == 200:
+                        data = response.json()
+                        session_id = data["session_id"]
+                        session_state = session_state.copy()
+                        session_state['session_id'] = session_id
+                        
+                        print(f"[前端] 自动连接到会话: {session_id[:8]}...")
+                        file_results = load_initial_files(session_state)
+                        return [session_id] + file_results
+                    else:
+                        print(f"[定时器] API返回状态码: {response.status_code}")
+                except Exception as e:
+                    print(f"[前端] 自动连接会话失败: {e}")
+                
+                return [
+                    "未连接",
+                    gr.update(choices=[]),
+                    gr.update(choices=[]),
+                    gr.update(choices=[]),
+                    gr.update(choices=[]),
+                    gr.update(value="<div class='warning'>⚠️ 请先连接会话或通过API设置GUID</div>", visible=True),
+                    session_state
+                ]
         
         # 初始化会话（兼容API调用）
         def init_session(session_state):
@@ -1167,7 +1303,7 @@ def create_interface():
             # 尝试自动连接最新会话
             try:
                 import requests
-                response = requests.get(f"http://10.120.20.213:{MAP_API_PORT}/api/latest_session")
+                response = requests.get(f"{APP_INTERNAL_BASE_URL}/api/latest_session")
                 if response.status_code == 200:
                     data = response.json()
                     session_id = data["session_id"]
@@ -1226,9 +1362,9 @@ def create_interface():
         # 添加定时器，每3秒刷新一次界面
         timer = gr.Timer(3)
         timer.tick(
-            fn=refresh_interface,
+            fn=refresh_interface_with_session_id,
             inputs=[session_state],
-            outputs=[brno_selector, invoice_selector, bill_selector, overseas_selector, status_display, session_state]
+            outputs=[session_id_display, brno_selector, invoice_selector, bill_selector, overseas_selector, status_display, session_state]
         )
 
         # 全局按钮事件
@@ -1286,6 +1422,18 @@ def create_interface():
             """Clears previous results and makes the status component visible to show progress."""
             return gr.update(visible=False), gr.update(value="", visible=True)
 
+        # 文件顺序管理按钮事件
+        update_order_btn.click(
+            fn=update_file_order,
+            inputs=[brno_selector, invoice_selector, bill_selector, overseas_selector, session_state],
+            outputs=[file_order_display, file_order_state]
+        )
+        
+        clear_order_btn.click(
+            fn=clear_file_order,
+            outputs=[file_order_display, file_order_state]
+        )
+
         # 合并按钮事件
         merge_event = merge_btn.click(
             fn=prepare_for_merge,
@@ -1293,7 +1441,7 @@ def create_interface():
             outputs=[file_link, status_label]
         ).then(
             fn=merge_files_async,
-            inputs=[merge_order_state, session_state, invoice_merge_mode],
+            inputs=[merge_order_state, session_state, invoice_merge_mode, file_order_display],
             outputs=[file_link, status_label]
         ).then(
             fn=clear_all_selectors,
