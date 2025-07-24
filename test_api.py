@@ -1,6 +1,6 @@
 import requests
 
-BASE_URL = "http://localhost:9995"
+BASE_URL = "http://localhost:9998"
 # BASE_URL = "http://10.120.20.213:17764"
 # BASE_URL = "http://10.120.20.176:15446"
 # BASE_URL = "http://10.120.20.176:20804"
@@ -20,11 +20,13 @@ def test_guid_setting():
     # test_guid = "f9f7578fdb6b4ef7b5d823dda1db06d5"
     # test_guid = "706b4cbdaaef4fbba04a26c506681b19"
     # test_guid = "755d365ca90e484091b580b75788c467" # 合并内容消失
-    test_guid = "0e169d3bd4254bbf94bc39e2f27ec0f8" # 含有br单、附件、发票和境外发票
+    # test_guid = "0e169d3bd4254bbf94bc39e2f27ec0f8" # 含有br单、附件、发票和境外发票
     # test_guid = "736cb0fc982b4b6a8ef2f1c825843cfc" # 含ofd
     # test_guid = "83796036a2da4967a6cc1128cf2e1d79"
     # test_guid = "255a2ca0b9324a769e04ff1c80bbd927"  # br单空白
     # test_guid = "3ce4dcd5d1984244a0f36dac1f1b3d1e"  # 测试用GUID
+    # test_guid = "2b6886cf37cc4dc1a772675e4776f62b"
+    test_guid = "32d17440e9c54969b6d3b4bbfcfcaf53"
     
     # 发送POST请求
     response = requests.post(

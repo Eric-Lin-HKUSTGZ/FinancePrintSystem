@@ -28,26 +28,123 @@ import time
 from pathlib import Path
 import pikepdf
 import fitz  # PyMuPDF
+import re
+
+def clean_filename(filename: str) -> str:
+    """
+    清理文件名，移除或替换非法字符
+    """
+    # 移除或替换Windows和Unix文件系统的非法字符
+    illegal_chars = r'[<>:"/\\|?*\x00-\x1f]'
+    filename = re.sub(illegal_chars, '_', filename)
+    
+    # 移除前后空格
+    filename = filename.strip()
+    
+    # 确保文件名不为空
+    if not filename:
+        filename = "unnamed_file"
+    
+    # 限制文件名长度（避免过长）
+    if len(filename) > 200:
+        name, ext = os.path.splitext(filename)
+        filename = name[:200-len(ext)] + ext
+    
+    return filename
+
+def should_skip_mac_file(filename: str) -> bool:
+    """
+    判断是否应该跳过MAC系统特有的文件
+    """
+    # 转换为小写进行比较
+    filename_lower = filename.lower()
+    
+    # 跳过MAC系统特有的文件和目录
+    mac_skip_patterns = [
+        '__macosx',  # MAC系统元数据目录
+        '.ds_store',  # MAC桌面服务文件
+        'thumbs.db',  # Windows缩略图文件
+        'desktop.ini',  # Windows桌面配置文件
+        '.trashes',  # MAC回收站
+        '.spotlight-v100',  # MAC Spotlight索引
+        '.fseventsd',  # MAC文件系统事件
+    ]
+    
+    # 检查是否匹配任何跳过模式
+    for pattern in mac_skip_patterns:
+        if pattern in filename_lower:
+            return True
+    
+    # 跳过以点开头的隐藏文件（除了正常的文件扩展名）
+    if filename.startswith('.') and not any(filename.endswith(ext) for ext in ['.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff']):
+        return True
+    
+    return False
+
+def is_valid_file_for_extraction(filename: str) -> bool:
+    """
+    判断文件是否适合提取（排除目录、MAC系统文件等）
+    """
+    # 跳过目录
+    if filename.endswith('/') or filename.endswith('\\'):
+        return False
+    
+    # 跳过MAC系统特有文件
+    if should_skip_mac_file(filename):
+        return False
+    
+    # 只处理常见的文档和图片文件
+    valid_extensions = {'.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.txt', '.rtf'}
+    file_ext = os.path.splitext(filename)[1].lower()
+    
+    return file_ext in valid_extensions
+
+def deduplicate_archive_files(file_list: list) -> list:
+    """
+    去重压缩文件中的重复条目，优先保留非MAC系统文件
+    """
+    seen_files = {}
+    deduplicated = []
+    
+    for file_info in file_list:
+        filename = file_info.filename.lower()
+        
+        # 跳过MAC系统文件
+        if should_skip_mac_file(filename):
+            continue
+        
+        # 获取文件的基本名称（不含路径）
+        base_name = os.path.basename(filename)
+        
+        # 如果已经见过这个文件，跳过重复项
+        if base_name in seen_files:
+            print(f"跳过重复文件: {filename}")
+            continue
+        
+        seen_files[base_name] = True
+        deduplicated.append(file_info)
+    
+    return deduplicated
 
 # 本地应用配置
 APP_HOST = "0.0.0.0"
 # APP_PORT = 9995
 # MAP_API_PORT = 20804
 APP_PORT = 9998
-MAP_API_PORT = 17764
+MAP_API_PORT = 20801
 # Gradio后端调用自身API时使用的基础URL
 APP_INTERNAL_BASE_URL = f"http://127.0.0.1:{APP_PORT}"
 
 # 外部服务配置
-MAP_API_HOST = "10.120.20.213"
-# MAP_API_HOST = "10.120.20.176"
+# MAP_API_HOST = "10.120.20.213"
+MAP_API_HOST = "10.120.20.176"
 MAP_API_BASE_URL = f"http://{MAP_API_HOST}:{MAP_API_PORT}"
 
 # 配置参数
 AUTH_USER = "brgpt"
 AUTH_PASS = "jiyMBV432-HAS98"
 BASE_URL = "https://pbms.hkust-gz.edu.cn"
-BASE_STATIC_DIR = Path("./test_file")
+BASE_STATIC_DIR = Path("./test_file2")
 TEMP_DIR = tempfile.gettempdir()
 GUID_FILE_DIR = BASE_STATIC_DIR / "guid_files"
 SESSIONS_DIR = BASE_STATIC_DIR / "sessions"
@@ -534,44 +631,152 @@ def download_file(file_type: str, guid: str, decoded_name: str = None, attachtyp
             if file_ext in ['.zip', '.rar']:
                 extract_dir = os.path.join(guid_dir, attachtype)
                 os.makedirs(extract_dir, exist_ok=True)
+                print(f"[解压] 开始解压 {file_ext} 文件到目录: {extract_dir}")
                 try:
                     if file_ext == '.zip':
+                        # 修复ZIP文件编码问题
                         with zipfile.ZipFile(real_file_path, 'r') as zip_ref:
-                            zip_ref.extractall(extract_dir)
+                            # 获取ZIP文件中的文件列表并去重
+                            file_list = deduplicate_archive_files(zip_ref.infolist())
+                            for zip_info in file_list:
+                                try:
+                                    # 尝试多种编码方式解码文件名
+                                    filename = None
+                                    encodings_to_try = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'cp437']
+                                    
+                                    for encoding in encodings_to_try:
+                                        try:
+                                            filename = zip_info.filename.encode('cp437').decode(encoding)
+                                            break
+                                        except (UnicodeDecodeError, UnicodeEncodeError):
+                                            continue
+                                    
+                                    if filename is None:
+                                        # 如果所有编码都失败，使用原始文件名
+                                        filename = zip_info.filename
+                                    
+                                    # 清理文件名中的非法字符
+                                    filename = clean_filename(filename)
+                                    
+                                    # 检查是否应该跳过此文件（MAC系统文件、目录等）
+                                    if not is_valid_file_for_extraction(filename):
+                                        print(f"跳过文件: {filename}")
+                                        continue
+                                    
+                                    # 解压单个文件
+                                    zip_ref.extract(zip_info, extract_dir)
+                                    
+                                    # 重命名解压后的文件（如果文件名被修改）
+                                    original_path = os.path.join(extract_dir, zip_info.filename)
+                                    new_path = os.path.join(extract_dir, filename)
+                                    
+                                    if original_path != new_path:
+                                        # 确保目标目录存在
+                                        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                                        if os.path.exists(new_path):
+                                            # 如果文件已存在，添加数字后缀
+                                            base, ext = os.path.splitext(filename)
+                                            counter = 1
+                                            while os.path.exists(new_path):
+                                                new_filename = f"{base}_{counter}{ext}"
+                                                new_path = os.path.join(extract_dir, new_filename)
+                                                counter += 1
+                                        shutil.move(original_path, new_path)
+                                    
+                                    # 添加到提取文件列表
+                                    extracted_files.append({
+                                        "guid": str(uuid.uuid4()),
+                                        "filename": os.path.basename(new_path),
+                                        "path": new_path,
+                                        "type": "file",
+                                        "attach_type": attachtype
+                                    })
+                                    print(f"[解压] 成功提取ZIP文件: {os.path.basename(new_path)}")
+                                    
+                                except Exception as e:
+                                    print(f"处理ZIP文件中的文件 {zip_info.filename} 失败: {str(e)}")
+                                    continue
+                                    
                     elif file_ext == '.rar':
+                        # 修复RAR文件编码问题
                         with rarfile.RarFile(real_file_path, 'r') as rar_ref:
-                            rar_ref.extractall(extract_dir)
-                    for root, dirs, files in os.walk(extract_dir):
-                        for file in files:
-                            src_path = os.path.join(root, file)
-                            relative_path = os.path.relpath(src_path, extract_dir)
-                            if os.path.dirname(relative_path) != '.':
-                                dest_path = os.path.join(extract_dir, file)
-                                base, ext = os.path.splitext(file)
-                                counter = 1
-                                while os.path.exists(dest_path):
-                                    dest_path = os.path.join(extract_dir, f"{base}_{counter}{ext}")
-                                    counter += 1
-                                shutil.move(src_path, dest_path)
-                                src_path = dest_path
-                            final_name = os.path.basename(src_path)
-                            base, ext = os.path.splitext(final_name)
-                            counter = 1
-                            while os.path.exists(os.path.join(extract_dir, final_name)):
-                                final_name = f"{base}_{counter}{ext}"
-                                counter += 1
-                            final_path = os.path.join(extract_dir, final_name)
-                            if src_path != final_path:
-                                shutil.move(src_path, final_path)
-                            extracted_files.append({
-                                "guid": str(uuid.uuid4()),
-                                "filename": final_name,
-                                "path": final_path,
-                                "type": "file",
-                                "attach_type": attachtype
-                            })
+                            # 获取RAR文件中的文件列表并去重
+                            file_list = deduplicate_archive_files(rar_ref.infolist())
+                            for rar_info in file_list:
+                                try:
+                                    # 尝试多种编码方式解码文件名
+                                    filename = None
+                                    encodings_to_try = ['utf-8', 'gbk', 'gb2312', 'latin-1']
+                                    
+                                    for encoding in encodings_to_try:
+                                        try:
+                                            filename = rar_info.filename.encode('latin-1').decode(encoding)
+                                            break
+                                        except (UnicodeDecodeError, UnicodeEncodeError):
+                                            continue
+                                    
+                                    if filename is None:
+                                        # 如果所有编码都失败，使用原始文件名
+                                        filename = rar_info.filename
+                                    
+                                    # 清理文件名中的非法字符
+                                    filename = clean_filename(filename)
+                                    
+                                    # 检查是否应该跳过此文件（MAC系统文件、目录等）
+                                    if not is_valid_file_for_extraction(filename):
+                                        print(f"跳过文件: {filename}")
+                                        continue
+                                    
+                                    # 解压单个文件
+                                    rar_ref.extract(rar_info, extract_dir)
+                                    
+                                    # 重命名解压后的文件（如果文件名被修改）
+                                    original_path = os.path.join(extract_dir, rar_info.filename)
+                                    new_path = os.path.join(extract_dir, filename)
+                                    
+                                    if original_path != new_path:
+                                        # 确保目标目录存在
+                                        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                                        if os.path.exists(new_path):
+                                            # 如果文件已存在，添加数字后缀
+                                            base, ext = os.path.splitext(filename)
+                                            counter = 1
+                                            while os.path.exists(new_path):
+                                                new_filename = f"{base}_{counter}{ext}"
+                                                new_path = os.path.join(extract_dir, new_filename)
+                                                counter += 1
+                                        shutil.move(original_path, new_path)
+                                    
+                                    # 添加到提取文件列表
+                                    extracted_files.append({
+                                        "guid": str(uuid.uuid4()),
+                                        "filename": os.path.basename(new_path),
+                                        "path": new_path,
+                                        "type": "file",
+                                        "attach_type": attachtype
+                                    })
+                                    print(f"[解压] 成功提取RAR文件: {os.path.basename(new_path)}")
+                                    
+                                except Exception as e:
+                                    print(f"处理RAR文件中的文件 {rar_info.filename} 失败: {str(e)}")
+                                    continue
+                    
+                    # 清理空目录
+                    for root, dirs, files in os.walk(extract_dir, topdown=False):
+                        for dir_name in dirs:
+                            dir_path = os.path.join(root, dir_name)
+                            try:
+                                if not os.listdir(dir_path):  # 如果目录为空
+                                    os.rmdir(dir_path)
+                            except OSError:
+                                pass  # 忽略删除目录时的错误
+                    
+                    print(f"[解压] 解压完成，共提取 {len(extracted_files)} 个有效文件")
+                                
                 except Exception as e:
                     print(f"解压失败: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
         return main_file_info, extracted_files
     except Exception as e:
         print(f"下载文件失败: {str(e)}")
